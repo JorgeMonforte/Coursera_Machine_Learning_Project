@@ -1,0 +1,119 @@
+---
+title: "Exercising monitoring"
+author: "Jorge Monforte González"
+date: "16 de julio de 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source('get_na_columns.R')
+
+# set this to false to compute everything, set it to true to load cached data
+LOAD_FROM_FILE <-TRUE
+
+```
+## Executive summary
+The objetive of this paper is fit a machine learning algorithm that is able to predict the *classe* (stored in column 160 of the data) of the exercise given the sensors values.
+
+## Dependencies
+We will be using these libraries during or model fitting.
+```{r message=FALSE,warning=FALSE,error=FALSE}
+library(caret)
+library(neuralnet)
+```
+
+## Data preparation
+First we load the data from the files in two data.frames, and remove the defective and metadata that is not useful for the training.
+
+```{r loading_data}
+training.base <- read.csv('pml-training.csv')
+testing.base <- read.csv('pml-testing.csv')
+
+# Remove spurious columns
+
+metadata_columns <- 1:7
+div_0_columns <- get_div0_columns(training.base)
+testing_na_columns <- get_na_columns(testing.base)
+problem_id_column <- 160
+
+training.clean <- training.base[,-1*c(metadata_columns, div_0_columns, testing_na_columns)]
+testing.clean <- testing.base[,-1*c(metadata_columns, div_0_columns, testing_na_columns, problem_id_column)]
+```
+
+
+## Network design and cross validation strategy
+For designing the neural network we have to evaluate the size of the hidden layer so it minimizes the cross validation error. For doing this we take a subsample of the data and train multiple geometries and then we search for the neural network geometry that minimizes the error.
+
+```{r train_networks}
+
+set.seed(543210)
+# Subsample training values for faster training work
+sampled_percentage <- 0.2
+sampled <- sample(1:nrow(training.clean), round(sampled_percentage*nrow(training.clean)))
+subsampled <- training.clean[sampled,]
+
+# Impute missing values
+impute.fit <- preProcess(subsampled, method=c("knnImpute"),
+thresh=0.95)
+subsampled <- predict(impute.fit, subsampled)
+
+# Partition data
+inTrain <- createDataPartition(y=subsampled$classe, p=0.60, list=FALSE)
+training <- subsampled[inTrain,]
+xvalidation <- subsampled[-inTrain,]
+
+# Split into target features sets
+classe_column <- which(colnames(training) == 'classe')
+training.Y <- training[,classe_column]
+xvalidation.Y <- xvalidation[,classe_column]
+training.features <- training[,-classe_column]
+xvalidation.features <- xvalidation[,-classe_column]
+
+# Reduce the number of features using PCA
+pre.fit <- preProcess(training.features, method=c("pca"),
+thresh=0.99)
+training.X <- predict(pre.fit, training.features)
+xvalidation.X <- predict(pre.fit, xvalidation.features)
+testing.X <- predict(pre.fit, testing.clean)
+
+if (LOAD_FROM_FILE) {
+    load(file='multiple_networks.save')
+} else {
+    nns <- multiple_train_nn(training.Y, training.X, 5, 39, 2, stepmax=1e+06)
+}
+
+
+
+```
+
+Let see how the generalization error behaves with the network complexity.
+
+```{r generalization_error,echo=FALSE}
+
+training_errors <- multiple_nn_error(nns, training.X, training.Y) 
+xvalidation_errors <- multiple_nn_error(nns, xvalidation.X, xvalidation.Y)
+
+plot_errors(training_errors, xvalidation_errors)
+```
+
+We can see that the best geometry is about 35 units, adding more units to the network perhaps it would reduce the cross validation error even more but it would take a lot of time, as it is being trained with only one core.
+
+## Testing data prediction
+
+With the neural network fitted we can now predict the testing values 
+
+```{r predict}
+nn <- nns$`35`
+predicted <- predict_nn(nn, testing.X)
+```
+
+Returning these values
+
+```{r results_frame,include=FALSE}
+res <- data.frame(test=seq(along.with=predicted), predicted=predicted)
+```
+
+```{r results_table,echo=FALSE}
+knitr::kable(res,)
+```
